@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agent-awareness installer (Linux / macOS).
+# agent-awareness installer (Linux + systemd).
 #   ./install.sh              install to ~/.local/bin and add the hooks
 #   ./install.sh --no-hooks   install the binary only
 #   ./install.sh --prefix DIR install somewhere else
@@ -24,8 +24,8 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,8) else 1)' \
   || { echo "python3 3.8+ is required (found $PYV)" >&2; exit 1; }
 
 mkdir -p "$PREFIX"
-ln -sfn "$ROOT/agentaware" "$PREFIX/agentaware"
-echo "[ok] agentaware -> $PREFIX/agentaware"
+ln -sfn "$ROOT/aw.py" "$PREFIX/aw"
+echo "[ok] aw -> $PREFIX/aw"
 
 case ":$PATH:" in
   *":$PREFIX:"*) ;;
@@ -34,10 +34,10 @@ case ":$PATH:" in
 esac
 
 if [ "$HOOKS" = 1 ]; then
-  "$ROOT/agentaware" install-hooks
+  "$ROOT/aw.py" install
 else
-  echo "[skip] hooks not installed (--no-hooks). Run 'agentaware install-hooks' later."
+  echo "[skip] hooks not installed (--no-hooks). Run 'aw install' later."
 fi
 
 echo
-"$ROOT/agentaware" doctor || true
+"$ROOT/aw.py" doctor || true

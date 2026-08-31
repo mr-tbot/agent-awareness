@@ -1,0 +1,32 @@
+{
+  "name": "agent-awareness",
+  "displayName": "agent-awareness",
+  "description": "Shows what every agent session on this machine is doing, and whether there is room to start something heavy.",
+  "version": "1.0.0",
+  "publisher": "mr-tbot",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/mr-tbot/agent-awareness" },
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "agentAwareness.showBoard", "title": "agent-awareness: Show board" },
+      { "command": "agentAwareness.refresh", "title": "agent-awareness: Refresh now" }
+    ],
+    "configuration": {
+      "title": "agent-awareness",
+      "properties": {
+        "agentAwareness.path": {
+          "type": "string", "default": "aw",
+          "description": "Path to the aw executable."
+        },
+        "agentAwareness.refreshSeconds": {
+          "type": "number", "default": 10, "minimum": 2,
+          "description": "How often to refresh the status bar."
+        }
+      }
+    }
+  }
+}

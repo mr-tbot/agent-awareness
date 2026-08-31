@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-awareness"
+version = "1.0.0"
+description = "A cooperative admission gate for machines running several agent coding sessions at once."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "mr-tbot" }]
+requires-python = ">=3.8"
+keywords = ["claude-code", "agents", "oom", "systemd", "cgroups", "resource-management"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Systems Administration",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/mr-tbot/agent-awareness"
+Issues = "https://github.com/mr-tbot/agent-awareness/issues"
+
+[project.scripts]
+aw = "aw:main"
+
+[tool.setuptools]
+py-modules = ["aw"]
