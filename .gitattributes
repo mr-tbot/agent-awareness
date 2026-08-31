@@ -1,0 +1,5 @@
+# The shipped helper must stay LF: a CRLF clone breaks the shebang.
+* text=auto eol=lf
+agentaware text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
