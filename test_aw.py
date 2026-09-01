@@ -210,11 +210,21 @@ def main():
         ok("  and is scoped by a matcher",
            any(e.get("matcher") for e in cfgx["hooks"]["PreToolUse"]
                if m["MARK"] in json.dumps(e)))
-        run("uninstall", env=senv)
+        # The toggle must work in BOTH directions. Removing only the events
+        # being installed would leave a previously-installed activity hook in
+        # place when the user runs --no-activity precisely to remove it.
+        def pre_count():
+            return sum(1 for e in json.loads(real.read_text())["hooks"].get("PreToolUse", [])
+                       if m["MARK"] in json.dumps(e))
+        def others():
+            return sum(1 for ev in json.loads(real.read_text())["hooks"].values()
+                       for e in ev if m["MARK"] not in json.dumps(e))
+        base_others = others()
         run("install", "--no-activity", env=senv)
-        check("--no-activity leaves it out",
-              sum(1 for e in json.loads(real.read_text())["hooks"].get("PreToolUse", [])
-                  if m["MARK"] in json.dumps(e)), 0)
+        check("--no-activity removes an already-installed activity hook", pre_count(), 0)
+        run("install", env=senv)
+        check("installing again puts it back", pre_count(), 1)
+        check("other tools' hooks are untouched throughout", others(), base_others)
         run("uninstall", env=senv)
         for _ in range(3):
             run("install", env=senv)

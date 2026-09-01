@@ -29,7 +29,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 MARK = "# agent-awareness"
 UID = os.getuid()
 
@@ -968,11 +968,20 @@ def cmd_install(args) -> int:
     exe = shutil.which("aw") or os.path.abspath(sys.argv[0])
     added = []
     events = list(EVENTS) + ([] if args.no_activity else [ACTIVITY_EVENT])
+    # Strip every hook of ours from every event we could ever install, before
+    # adding back only the ones selected. Removing just the ones being installed
+    # would leave a previously-installed activity hook in place when the user
+    # runs --no-activity precisely to get rid of it.
+    for ev, _ in list(EVENTS) + [ACTIVITY_EVENT]:
+        groups = (cfg.get("hooks") or {}).get(ev)
+        if isinstance(groups, list):
+            groups[:] = [g for g in groups if MARK not in json.dumps(g)]
+            if not groups:
+                cfg["hooks"].pop(ev, None)
     for ev, arg in events:
         entries = cfg.setdefault("hooks", {}).setdefault(ev, [])
         if not isinstance(entries, list):
             die(f"hooks.{ev} is not a list. Refusing.", RC_REFUSED)
-        entries[:] = [e for e in entries if MARK not in json.dumps(e)]
         entry = {"hooks": [{"type": "command",
                             "command": f'"{exe}" hook {arg}   {MARK}',
                             "timeout": 5}]}
