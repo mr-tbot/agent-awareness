@@ -155,6 +155,39 @@ def main():
         check("SessionEnd removes the session",
               len(json.loads(run("board", "--json", env=env).stdout)["sessions"]), 0)
 
+        print("activity reporting")
+        def act(tool, ti):
+            run("hook", "activity", env=env, stdin=json.dumps(
+                {"session_id": sid, "cwd": str(HERE), "tool_name": tool,
+                 "tool_input": ti}))
+            b = json.loads(run("board", "--json", env=env).stdout)["sessions"]
+            r = [x for x in b if x["session_id"] == sid][0]
+            return f"{r.get('verb','')} {r.get('object','')}".strip()
+
+        run("hook", "session-start",
+            stdin=json.dumps({"session_id": sid, "cwd": str(HERE)}), env=env)
+        check("a build command reports the binary, not a guessed class",
+              act("Bash", {"command": "./gradlew assembleDebug"}), "running gradlew")
+        check("a served port is reported",
+              act("Bash", {"command": "python3 -m http.server --port 8080"}),
+              "port python3 :8080")
+        check("a file write is reported by basename",
+              act("Write", {"file_path": "/a/b/server.py"}), "writing server.py")
+        check("a file read is reported by basename",
+              act("Read", {"file_path": "/a/b/Manifest.xml"}), "reading Manifest.xml")
+        check("a fetch reports the host only",
+              act("WebFetch", {"url": "https://developer.android.com/guide/x"}),
+              "fetching developer.android.com")
+        act("Bash", {"command": "curl --token ghp_abcdefgh12345678 https://u:pw@x.com/y"})
+        blob = run("board", "--json", env=env).stdout
+        ok("a token in argv never reaches the record", "ghp_abcdefgh" not in blob)
+        ok("a URL password never reaches the record", "pw@x.com" not in blob)
+        ok("the full command string is never stored", "curl --token" not in blob)
+        check("  and it is still reported usefully",
+              [x for x in json.loads(blob)["sessions"] if x["session_id"] == sid][0]["verb"],
+              "running")
+        run("hook", "end", stdin=json.dumps({"session_id": sid}), env=env)
+
         print("settings merge")
         real = scratch / "settings.json"
         real.write_text(json.dumps({
@@ -170,6 +203,21 @@ def main():
         senv = {**env, "AW_SETTINGS": str(link)}
         for _ in range(3):
             check("install succeeds", run("install", env=senv).returncode, 0)
+        cfgx = json.loads(real.read_text())
+        check("the activity hook is installed by default",
+              sum(1 for e in cfgx["hooks"].get("PreToolUse", [])
+                  if m["MARK"] in json.dumps(e)), 1)
+        ok("  and is scoped by a matcher",
+           any(e.get("matcher") for e in cfgx["hooks"]["PreToolUse"]
+               if m["MARK"] in json.dumps(e)))
+        run("uninstall", env=senv)
+        run("install", "--no-activity", env=senv)
+        check("--no-activity leaves it out",
+              sum(1 for e in json.loads(real.read_text())["hooks"].get("PreToolUse", [])
+                  if m["MARK"] in json.dumps(e)), 0)
+        run("uninstall", env=senv)
+        for _ in range(3):
+            run("install", env=senv)
         ok("the symlink is still a symlink", link.is_symlink())
         cfg = json.loads(real.read_text())
         check("three installs leave one entry",

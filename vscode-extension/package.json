@@ -2,7 +2,7 @@
   "name": "agent-awareness",
   "displayName": "agent-awareness",
   "description": "Shows what every agent session on this machine is doing, and whether there is room to start something heavy.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "mr-tbot",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/mr-tbot/agent-awareness" },

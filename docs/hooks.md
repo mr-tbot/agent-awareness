@@ -1,6 +1,6 @@
 # Hooks
 
-`aw install` adds four entries to `~/.claude/settings.json`, each tagged `# agent-awareness` inside
+`aw install` adds five entries to `~/.claude/settings.json`, each tagged `# agent-awareness` inside
 the command string — which is how `aw uninstall` finds exactly its own and nothing else.
 
 | Event | Records | Why it is needed |
@@ -9,6 +9,7 @@ the command string — which is how `aw uninstall` finds exactly its own and not
 | `UserPromptSubmit` | `working` | The turn began |
 | `Stop` | `idle` | The turn ended normally |
 | `SessionEnd` | removes the record | A session killed mid-turn never fires `Stop` |
+| `PreToolUse` | what the session is touching — see below | Optional: `aw install --no-activity` skips it |
 
 `SessionEnd` is not optional. Without it a session that dies mid-turn shows as "working" forever.
 (`SIGKILL` fires no hook at all — that case is handled by liveness, not by hooks.)
@@ -26,9 +27,19 @@ context before the first turn:
 
 No `CLAUDE.md` edit, nothing to drift, always current.
 
-## Why PreToolUse and PostToolUse are not installed
+## The activity hook is observe-only
 
-Both were tried and rejected on measurements, not taste:
+`PreToolUse` is installed, but it **never returns a permission decision**. That distinction is the
+whole design: every objection below is an objection to *deciding* in a hook, not to *observing* in one.
+
+It records literal fields only — a command's `argv[0]`, a file's basename, a URL's host, a port
+literal, the subagent type. It never records a command string, never classifies "is this a build",
+and always exits 0. Cost is ~43 ms per tool call against a 5-second timeout;
+`aw install --no-activity` leaves it out.
+
+## Why nothing blocks, and why PostToolUse is absent
+
+Measurements, not taste:
 
 - **A `PreToolUse` deny livelocks.** A hook that denies a build with "re-run it via `aw run`" denies
   the `aw run` wrapper too, because the matcher fires on that command as well. The observed outcome
@@ -42,8 +53,9 @@ Both were tried and rejected on measurements, not taste:
 - **Hook timeouts are not uniform**; an omitted `timeout` on `PreToolUse` was observed running for
   minutes before being killed. On the Bash critical path that is a stall on every tool call.
 
-What is lost by cutting them is *enforcement*. That trade is stated on the tin: this tool is
-cooperative. A session that never calls `aw run` is not managed.
+What is given up is *enforcement*, and that trade is stated on the tin: this tool is cooperative. A
+session that never calls `aw run` is not managed. What is kept is the reporting, because observing
+carries none of the four failure modes above.
 
 ## Identity
 

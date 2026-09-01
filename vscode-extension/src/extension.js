@@ -19,42 +19,52 @@ function gb(n) { return (n / (1024 ** 3)).toFixed(1) + 'G'; }
 
 function render(board) {
   const m = board.machine || {};
-  const sessions = Object.values(board.sessions || {});
-  const slots = Object.values(board.slots || {});
+  const sessions = board.sessions || [];
+  const jobs = board.jobs || [];
   const busy = {};
-  for (const s of slots) busy[s.class] = (busy[s.class] || 0) + 1;
+  for (const j of jobs) busy[j.class] = (busy[j.class] || 0) + 1;
   const running = Object.entries(busy).map(([k, n]) => `${n} ${k}`).join(', ');
+  const availMib = m.mem_available_mib || 0;
 
   item.text = `$(pulse) ${sessions.length} session${sessions.length === 1 ? '' : 's'}`
     + (running ? ` · ${running}` : '')
-    + ` · ${gb(m.mem_available || 0)} free`;
+    + ` · ${gb(availMib * 1024 * 1024)} free`;
 
   // The kill threshold is the only number worth colouring on.
-  const limit = (m.oomd && m.oomd.pressure_pct) || 50;
-  const pressure = m.mem_pressure || 0;
-  item.backgroundColor = pressure >= limit / 2
+  const limit = m.oomd_limit_pct || 50;
+  const pressure = m.psi_full10 || 0;
+  item.backgroundColor = pressure >= (m.veto_psi || 20)
     ? new vscode.ThemeColor('statusBarItem.errorBackground')
     : pressure > 0 ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
 
   const lines = [
-    `**${gb(m.mem_available || 0)} available** of ${gb(m.mem_total || 0)}`,
-    `memory pressure ${pressure.toFixed(1)}% — systemd-oomd kills at ${limit}%`,
-    `swap ${(m.swap_used_pct || 0).toFixed(0)}%  ·  cpu ${(m.cpu_pressure || 0).toFixed(0)}%`,
+    `**${gb(availMib * 1024 * 1024)} available** of `
+      + gb((m.mem_total_mib || 0) * 1024 * 1024),
+    `memory pressure ${pressure.toFixed(2)}% — systemd-oomd kills at ${limit}% for 20s`,
     '',
   ];
   if (sessions.length) {
-    for (const s of sessions.sort((a, b) => (a.since || 0) - (b.since || 0))) {
-      lines.push(`\`${(s.repo || '?').padEnd(18)}\` ${s.activity || '?'}` +
-                 (s.detail ? ` — ${s.detail}` : ''));
+    lines.push('| repo | doing |', '|---|---|');
+    for (const s of sessions.sort((a, b) => (a.started_at || 0) - (b.started_at || 0))) {
+      const act = [s.verb, s.object].filter(Boolean).join(' ') || s.state || '?';
+      lines.push(`| ${s.repo || '?'} | ${act} |`);
     }
   } else {
-    lines.push('_no sessions reporting — run `aw install-hooks`_');
+    lines.push('_no sessions reporting — run `aw install`, then restart them_');
   }
-  if (slots.length) {
-    lines.push('', '**Holding a slot**');
-    for (const s of slots) lines.push(`\`${s.class}\` ${s.repo || '?'} — ${s.why || ''}`);
+  if (jobs.length) {
+    lines.push('', '**Metered jobs**');
+    for (const j of jobs) {
+      lines.push(`\`${j.class}\` ${j.repo || '?'} — ${j.cmd_display || ''}`
+        + (j.ownerless ? '  **(no owner — run `aw doctor --reap`)**' : ''));
+    }
   }
-  const md = new vscode.MarkdownString(lines.join('\n\n'));
+  // Say plainly what this view cannot show, rather than implying that each
+  // window is isolated. Activity is per session; memory is shared fate.
+  lines.push('', '_Every window shares one cgroup, so an oomd kill takes all of '
+                 + 'them. Activity is per session; memory is not._');
+
+  const md = new vscode.MarkdownString(lines.join('\n'));
   md.isTrusted = false;
   item.tooltip = md;
 }

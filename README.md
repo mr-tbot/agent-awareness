@@ -54,11 +54,12 @@ $ aw board
 
   CLEAR TO BUILD — 6.1 GiB headroom after a 2.0 GiB job
 
-  SESSION    WINDOW    REPO                   STATE      RUNNING
-  a3f2 (this one) win-4077  MAIN-NET          working    —
-  7b91       win-4077  HeadzUp                working    build gradlew 4m12s 1.9 GiB
-  c04e       win-5523  whitelistwarden        idle 3m    —
-  e5da       win-5523  seotrack-app           working    —
+  SESSION    WINDOW    REPO                   STATE     DOING                  METERED JOB
+  a3f2 (this one) win-4077  MAIN-NET          working   writing aw.py          —
+  7b91       win-4077  HeadzUp                working   running gradlew        build gradlew 4m12s 1.9 GiB
+  c04e       win-5523  whitelistwarden        idle 3m   —                      —
+  e5da       win-5523  seotrack-app           working   port python3 :8080     —
+  1188       win-6001  StreamScope            working   reading Manifest.xml   —
 
   QUEUE   empty
 
@@ -88,7 +89,7 @@ cd agent-awareness
 ./install.sh
 ```
 
-That links `aw` into `~/.local/bin` and adds four hooks to `~/.claude/settings.json`. Then restart
+That links `aw` into `~/.local/bin` and adds five hooks to `~/.claude/settings.json`. Then restart
 your agent sessions — **live sessions do not pick up newly installed hooks.**
 
 ```bash
@@ -115,6 +116,22 @@ Classes only pick a starting cost: `build` 2 GiB, `render` 4 GiB, `test` 1 GiB, 
 cost is **measured**, not guessed — sampled from the job's own cgroup at 1 Hz and stored per
 `class:argv0:repo`.
 
+## What each session reports
+
+The board answers "what is everyone doing", not just "is the machine busy":
+
+| Shown | From |
+|---|---|
+| `running gradlew` | the command's `argv[0]`, never the command |
+| `port python3 :8080` | a port literal in the command |
+| `writing server.py` / `reading Manifest.xml` | the file's basename |
+| `fetching developer.android.com` | the URL's host |
+| `subagent code-reviewer` | the subagent type |
+
+This comes from an **observe-only** `PreToolUse` hook. It never returns a permission decision, so it
+cannot livelock the way a denying gate does, and it records only literal fields — never the command
+string. Skip it with `aw install --no-activity` if you would rather not spend ~43 ms per tool call.
+
 ## How it decides
 
 One predictive term and one veto, both read inside the same lock that records the decision:
@@ -140,14 +157,15 @@ environment knobs, every decision is appended to `~/.local/state/agent-awareness
 
 ## What it does not do
 
-1. **It does not enforce.** There is no `PreToolUse` interception. An agent that does not call
-   `aw run` is not managed. This is cooperative by design — see [docs/hooks.md](docs/hooks.md) for the
-   measurements behind that choice, including a deny-hook that livelocked because it denied the very
-   wrapper it was recommending.
+1. **It does not enforce.** Nothing blocks a tool call. An agent that does not call `aw run` is not
+   managed. This is cooperative by design — see [docs/hooks.md](docs/hooks.md), including the
+   deny-hook that livelocked by denying the very wrapper it was recommending.
 2. **No command-string classification.** Guessing "is this a build" from a shell command was 77%
-   false-positive on real history. `--class` is explicit and always wins.
-3. **No command strings in the registry** beyond `argv[0] argv[1]` — real shell history is full of
-   credentials.
+   false-positive on real history. The board reports that a session is `running gradlew` — a literal
+   fact — never that it is "building". The cost class is something you declare to `aw run`, never
+   something a hook infers.
+3. **No command strings anywhere.** Only `argv[0]`, a file's basename, or a URL's host. Real shell
+   history is full of credentials, and the board is readable by every session on the machine.
 4. **No CPU, IO, GPU or thermal gating.** Each was measured and rejected: the `io` controller is not
    delegated to user slices so `IOWeight` is a silent no-op; `/proc/pressure/cpu full` is structurally
    always zero at system level; load average read 4.80 against a CPU PSI of 0.02. See
@@ -166,11 +184,13 @@ machine was 7 in 14 days. If that number does not fall, the tool failed — howe
 
 ## Optional: the VS Code status bar
 
-[`vscode-extension/`](vscode-extension/) is a small status bar item showing the same data. It is
-genuinely optional and packaged as a `.vsix` (`npx @vscode/vsce package`) with no marketplace account
-needed. Be aware of what it can and cannot show: because every window shares one cgroup, per-window
-rows describe a granularity finer than the unit that actually dies. The terminal `aw board` is the
-real interface.
+[`vscode-extension/`](vscode-extension/) is a status bar item — session count, running jobs, free
+memory — with the full board on hover and a click to open it in a terminal. Packaged as a `.vsix`
+(`npx @vscode/vsce package`), no marketplace account needed.
+
+It is honest about one thing that a per-window view naturally implies and should not: **activity is
+per session, memory is not.** Every window shares one cgroup, so pressure is shared fate and an oomd
+kill takes all of them at once. The tooltip says so.
 
 ## Related
 

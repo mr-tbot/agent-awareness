@@ -29,7 +29,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 MARK = "# agent-awareness"
 UID = os.getuid()
 
@@ -713,7 +713,8 @@ def board_text(me_apid: int | None = None) -> str:
     out.append("")
 
     if sessions:
-        out.append(f"  {'SESSION':<10} {'WINDOW':<9} {'REPO':<22} {'STATE':<10} RUNNING")
+        out.append(f"  {'SESSION':<10} {'WINDOW':<9} {'REPO':<22} {'STATE':<9} "
+                   f"{'DOING':<26} METERED JOB")
         run_by = {}
         for j in running:
             run_by.setdefault(j.get("agent_pid"), []).append(j)
@@ -725,8 +726,10 @@ def board_text(me_apid: int | None = None) -> str:
             state = s.get("state", "?")
             if state == "idle" and s.get("last_seen"):
                 state = f"idle {_age(s['last_seen'])}"
+            act = " ".join(x for x in (s.get("verb", ""), s.get("object", "")) if x)
             out.append(f"  {tag:<10} {s.get('window','-'):<9} "
-                       f"{s.get('repo','?')[:22]:<22} {state:<10} {doing}")
+                       f"{s.get('repo','?')[:22]:<22} {state:<9} "
+                       f"{act[:26]:<26} {doing}")
     else:
         out.append("  no sessions reporting — run `aw install`, then restart them")
     out.append("")
@@ -786,12 +789,62 @@ def cmd_status(args) -> int:
 
 EVENTS = [("SessionStart", "session-start"), ("UserPromptSubmit", "prompt"),
           ("Stop", "stop"), ("SessionEnd", "end")]
-# PreToolUse and PostToolUse are deliberately absent. Each was measured to be
+# Optional, installed unless --no-activity: reports WHAT a session is touching.
+ACTIVITY_EVENT = ("PreToolUse", "activity")
+# The `activity` hook is PreToolUse, and it is strictly OBSERVE-ONLY: it never
+# returns a permission decision, so it cannot livelock the way a denying gate
+# does (a deny that says "re-run via aw run" denies the wrapper too, and the
+# agent abandons the work). It records only literal fields from the payload —
+# the tool name, a file's basename, a command's argv[0], a URL's host — and
+# never a command string, because real shell history is full of credentials.
+# It costs ~43 ms on a tool call against a 5 s timeout, which is why it is
+# separable: `aw install --no-activity` leaves it out.
+#
+# PostToolUse is absent unconditionally. Each of these was measured to be
 # independently disqualifying: classifying Bash commands is 77% false-positive
 # on real history; a PreToolUse deny that says "re-run via aw run" denies the
 # wrapper too and the agent gives up; PostToolUse fires when the CALL returns,
 # not when the WORK ends; and recording command strings leaks credentials. What
 # is lost is enforcement — this tool is cooperative, and says so on the tin.
+
+
+_PORT = re.compile(r"(?:(?:--|-)port[= ]|localhost:|127\.0\.0\.1:|0\.0\.0\.0:|:)(\d{2,5})\b")
+
+
+def describe(payload: dict) -> tuple[str, str]:
+    """What is this session touching? Literal fields only — never a guess.
+
+    Returns (verb, object). Nothing here classifies: `make` is reported as
+    running `make`, not as "a build", because deciding whether a command is a
+    build from its text was 77% false-positive on real history. The cost class
+    is something the caller declares to `aw run`, not something a hook infers.
+    """
+    tool = payload.get("tool_name", "")
+    ti = payload.get("tool_input") or {}
+    if tool == "Bash":
+        cmd = str(ti.get("command", ""))
+        argv0 = ""
+        for tok in cmd.strip().split():
+            if "=" in tok and not tok.startswith("-"):
+                continue                       # leading VAR=value assignments
+            argv0 = os.path.basename(tok.strip("\"'()"))
+            break
+        m = _PORT.search(cmd)
+        if m and 1 <= int(m.group(1)) <= 65535:
+            return "port", f"{argv0} :{m.group(1)}"
+        return "running", argv0[:24]
+    if tool in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
+        return "writing", os.path.basename(str(ti.get("file_path", "")))[:32]
+    if tool in ("Read", "Grep", "Glob"):
+        target = ti.get("file_path") or ti.get("path") or ti.get("pattern") or ""
+        return "reading", os.path.basename(str(target))[:32]
+    if tool in ("WebFetch", "WebSearch"):
+        url = str(ti.get("url", ""))
+        m = re.match(r"https?://([^/]+)", url)
+        return "fetching", (m.group(1) if m else "web")[:32]
+    if tool == "Task":
+        return "subagent", str(ti.get("subagent_type", ""))[:24]
+    return "using", tool[:24]
 
 
 def cmd_hook(args) -> int:
@@ -823,6 +876,10 @@ def _hook(event: str, payload: dict) -> int:
 
     state = {"session-start": "starting", "prompt": "working", "stop": "idle"}.get(
         event, "working")
+    verb = obj = ""
+    if event == "activity":
+        verb, obj = describe(payload)
+        state = "working"
     cwd = payload.get("cwd") or os.getcwd()
     prev = read_json(f) or {}
     write_json(f, {
@@ -830,6 +887,8 @@ def _hook(event: str, payload: dict) -> int:
         "boot_id": boot_id(), "window": window_id(apid),
         "cwd": cwd, "repo": os.path.basename(cwd) or cwd,
         "branch": git_branch(cwd), "state": state,
+        "verb": verb or (prev.get("verb", "") if event != "stop" else ""),
+        "object": obj or (prev.get("object", "") if event != "stop" else ""),
         "started_at": prev.get("started_at") or time.time(),
         "last_seen": time.time(),
     })
@@ -908,14 +967,18 @@ def cmd_install(args) -> int:
 
     exe = shutil.which("aw") or os.path.abspath(sys.argv[0])
     added = []
-    for ev, arg in EVENTS:
+    events = list(EVENTS) + ([] if args.no_activity else [ACTIVITY_EVENT])
+    for ev, arg in events:
         entries = cfg.setdefault("hooks", {}).setdefault(ev, [])
         if not isinstance(entries, list):
             die(f"hooks.{ev} is not a list. Refusing.", RC_REFUSED)
         entries[:] = [e for e in entries if MARK not in json.dumps(e)]
-        entries.append({"hooks": [{"type": "command",
-                                   "command": f'"{exe}" hook {arg}   {MARK}',
-                                   "timeout": 5}]})
+        entry = {"hooks": [{"type": "command",
+                            "command": f'"{exe}" hook {arg}   {MARK}',
+                            "timeout": 5}]}
+        if ev == "PreToolUse":
+            entry["matcher"] = "Bash|Edit|MultiEdit|Write|NotebookEdit|Read|Grep|Glob|WebFetch|Task"
+        entries.append(entry)
         added.append(ev)
 
     if args.dry_run:
@@ -1101,13 +1164,14 @@ def cmd_doctor(args) -> int:
     installed = 0
     try:
         cfg = json.loads(sp.read_text()) if sp.exists() else {}
-        for ev, _ in EVENTS:
+        for ev, _ in list(EVENTS) + [ACTIVITY_EVENT]:
             if any(MARK in json.dumps(e) for e in (cfg.get("hooks") or {}).get(ev, [])):
                 installed += 1
     except (OSError, ValueError):
         pass
-    print(f"  hooks     {installed}/{len(EVENTS)} installed in {sp}"
-          + ("  OK" if installed == len(EVENTS) else "  -> aw install"))
+    total = len(EVENTS) + 1
+    print(f"  hooks     {installed}/{total} installed in {sp}"
+          + ("  OK" if installed == total else "  -> aw install"))
     pd = settings_path().parent
     if pd.exists():
         pm = pd.stat().st_mode & 0o777
@@ -1152,13 +1216,16 @@ def main() -> int:
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("hook", help="hook entry point")
-    s.add_argument("event", choices=[a for _, a in EVENTS])
+    s.add_argument("event", choices=[a for _, a in EVENTS] + [ACTIVITY_EVENT[1]])
     s.set_defaults(fn=cmd_hook)
 
     s = sub.add_parser("install", help="add the four hooks, leaving others alone")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--fix-perms", action="store_true",
                    help="chmod 0700 the settings directory if it is world-writable")
+    s.add_argument("--no-activity", action="store_true",
+                   help="skip the observe-only PreToolUse hook that reports which "
+                        "file, port or command each session is touching")
     s.set_defaults(fn=cmd_install)
 
     sub.add_parser("uninstall", help="remove only our hooks").set_defaults(fn=cmd_uninstall)
