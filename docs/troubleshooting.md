@@ -33,6 +33,11 @@ $ echo '{"session_id":"t","cwd":"/tmp"}' | aw hook session-start
 {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}
 ```
 
+`aw uninstall` removes our entries and leaves every other tool's alone, including hooks sharing a
+matcher group with ours. It does **not** reproduce the file byte-for-byte: the whole document is
+re-serialised with two-space indent, so unrelated formatting and key order may change. If that
+matters, restore from the `.aw.bak` copy instead.
+
 Every hook path catches everything and exits 0, so a broken hook is silent by design. That is
 deliberate — a hook that can fail a turn is a hook you would remove — but it does mean you have to
 run it manually to see the error.
@@ -128,7 +133,7 @@ You lose the "what is each session touching" column and keep everything else.
 ## Full uninstall
 
 ```console
-$ aw uninstall                  # restores settings.json exactly; keeps one .aw.bak
+$ aw uninstall                  # removes only our entries; writes settings.json.aw-uninstall.bak
 $ rm ~/.local/bin/aw
 $ rm -rf ~/.local/state/agent-awareness    # costs.json, decisions.jsonl, history
 $ rm -rf /run/user/$UID/agent-awareness    # or just reboot; it is tmpfs
@@ -145,7 +150,8 @@ from `~/.claude/settings.json`.
 | `~/.local/state/agent-awareness/costs.json` | Learned memory cost per `class:argv0:repo` | Yes |
 | `~/.local/state/agent-awareness/decisions.jsonl` | Every gate decision, for fitting the thresholds | Yes |
 | `~/.claude/settings.json` | The five hook entries, marked `# agent-awareness` | Yes |
-| `~/.claude/settings.json.aw.bak` | One backup, overwritten each install | Yes |
+| `~/.claude/settings.json.aw.bak` | Pre-**install** copy, overwritten by each install | Yes |
+| `~/.claude/settings.json.aw-uninstall.bak` | Pre-**uninstall** copy. A separate name, so uninstalling does not overwrite the copy you would roll back to | Yes |
 
 Nothing is written to your project directories.
 

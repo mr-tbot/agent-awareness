@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-awareness"
-version = "1.1.1"
+version = "1.2.0"
 description = "A cooperative admission gate for machines running several agent coding sessions at once."
 readme = "README.md"
 license = { text = "MIT" }

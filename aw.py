@@ -29,7 +29,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 MARK = "# agent-awareness"
 UID = os.getuid()
 
@@ -238,12 +238,18 @@ class Lock:
 
 
 def write_json(path: Path, obj: dict) -> None:
+    # os.write can short-write on ENOSPC and return normally, so a truncated
+    # file gets fsynced and renamed into place with no error anywhere. The io
+    # layer loops and raises instead.
     fd, tmp = tempfile.mkstemp(dir=str(path.parent))
     try:
-        os.write(fd, json.dumps(obj, sort_keys=True).encode())
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        with os.fdopen(fd, "wb") as f:
+            f.write(json.dumps(obj, sort_keys=True).encode())
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        os.unlink(tmp)
+        raise
     os.replace(tmp, path)
 
 
@@ -404,6 +410,11 @@ def oomd_limit() -> tuple[float, str]:
 
 def gate(cost_mib: int) -> tuple[bool, str]:
     """One predictive term, one veto. Two file reads. Call inside the lock."""
+    why = in_container()
+    if why:
+        return False, (f"running in a container ({why}); /proc/meminfo here is the "
+                       f"host's, so this gate would read a number unrelated to the "
+                       f"limit that kills this container")
     psi = psi_full10()
     limit, _ = oomd_limit()
     if psi >= VETO_PSI:
@@ -501,16 +512,19 @@ def cmd_run(args) -> int:
                "cost_src": src, "scope": scope, "state": "waiting",
                "agent_pid": apid, "starttime": astart, "boot_id": boot_id(),
                "repo": os.path.basename(os.getcwd()), "cwd": os.getcwd(),
-               "cmd_display": " ".join(cmd[:2])[:80],
+               "cmd_display": _safe(" ".join(cmd[:2])[:80]),
                "queued_at": time.time(), "started_at": 0}
         jf = reg_dir() / "jobs" / f"{seq:08d}-{uid}.json"
         write_json(jf, job)
-
-    # Hold this job file for the life of the run. Python fds are close-on-exec
-    # by default, so the child cannot inherit it and keep the slot after the
-    # runner is gone — the phantom-slot bug that `flock -o` exists to avoid.
-    jfd = os.open(jf, os.O_RDWR | os.O_CLOEXEC)
-    fcntl.flock(jfd, fcntl.LOCK_EX)
+        # Flock it BEFORE releasing the registry lock. A ticket that is visible
+        # but not yet flocked satisfies neither liveness clause in live_jobs(),
+        # so any concurrent reader in that window deletes it as dead — the job
+        # then waits forever for a queue position that no longer exists.
+        #
+        # Python fds are close-on-exec by default, so the child cannot inherit
+        # this and keep the slot alive after the runner is gone.
+        jfd = os.open(jf, os.O_RDWR | os.O_CLOEXEC)
+        fcntl.flock(jfd, fcntl.LOCK_EX)
     deadline = time.monotonic() + args.timeout
     waited, announced = 0.0, False
     try:
@@ -535,6 +549,14 @@ def cmd_run(args) -> int:
                 else:
                     ahead = [j for j in waiting if j.get("seq", 0) < seq]
                     reason = f"{len(ahead)} job(s) ahead of you in the queue"
+            if not announced:
+                # Log the refusal, not just the admission. Fitting the floor
+                # from decisions.jsonl needs the cases where the gate said no —
+                # a log of successes alone cannot tell you the floor is too high.
+                log_decision({"t": int(time.time()), "key": cost_key(args.klass, cmd),
+                              "cost": cost, "avail": mem_available_mib(),
+                              "psi_full10": psi_full10(), "verdict": "refused",
+                              "reason": reason[:160], "waited_s": 0})
             if time.monotonic() >= deadline:
                 log_decision({"t": int(time.time()), "key": cost_key(args.klass, cmd),
                               "cost": cost, "avail": mem_available_mib(),
@@ -811,6 +833,21 @@ ACTIVITY_EVENT = ("PreToolUse", "activity")
 _PORT = re.compile(r"(?:(?:--|-)port[= ]|localhost:|127\.0\.0\.1:|0\.0\.0\.0:|:)(\d{2,5})\b")
 
 
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _safe(v) -> str:
+    """Strip control bytes at intake, before anything is stored or printed.
+
+    The board renders strings that came from a tool payload — a filename, a
+    repo name, a command's argv[0]. A terminal interprets ANSI escapes in them,
+    which is enough to redraw the board above the cursor and show a device as
+    free while another session holds it. Scrubbing here rather than at each
+    print site also keeps the poison out of the on-disk record.
+    """
+    return _CTRL.sub("?", str(v))
+
+
 def describe(payload: dict) -> tuple[str, str]:
     """What is this session touching? Literal fields only — never a guess.
 
@@ -879,14 +916,15 @@ def _hook(event: str, payload: dict) -> int:
     verb = obj = ""
     if event == "activity":
         verb, obj = describe(payload)
+        verb, obj = _safe(verb), _safe(obj)
         state = "working"
     cwd = payload.get("cwd") or os.getcwd()
     prev = read_json(f) or {}
     write_json(f, {
         "session_id": sid, "agent_pid": apid, "starttime": astart,
         "boot_id": boot_id(), "window": window_id(apid),
-        "cwd": cwd, "repo": os.path.basename(cwd) or cwd,
-        "branch": git_branch(cwd), "state": state,
+        "cwd": _safe(cwd), "repo": _safe(os.path.basename(cwd) or cwd),
+        "branch": _safe(git_branch(cwd)), "state": state,
         "verb": verb or (prev.get("verb", "") if event != "stop" else ""),
         "object": obj or (prev.get("object", "") if event != "stop" else ""),
         "started_at": prev.get("started_at") or time.time(),
@@ -972,12 +1010,22 @@ def cmd_install(args) -> int:
     # adding back only the ones selected. Removing just the ones being installed
     # would leave a previously-installed activity hook in place when the user
     # runs --no-activity precisely to get rid of it.
+    # Filter INSIDE each group, never the group itself. Another tool's hook can
+    # legitimately share a matcher group with ours — devlock's does — and
+    # dropping the whole group because ours is in it silently uninstalls
+    # somebody else's guard.
     for ev, _ in list(EVENTS) + [ACTIVITY_EVENT]:
         groups = (cfg.get("hooks") or {}).get(ev)
-        if isinstance(groups, list):
-            groups[:] = [g for g in groups if MARK not in json.dumps(g)]
-            if not groups:
-                cfg["hooks"].pop(ev, None)
+        if not isinstance(groups, list):
+            continue
+        for g in groups:
+            hl = g.get("hooks") if isinstance(g, dict) else None
+            if isinstance(hl, list):
+                hl[:] = [h for h in hl if MARK not in json.dumps(h)]
+        groups[:] = [g for g in groups
+                     if not isinstance(g, dict) or g.get("hooks")]
+        if not groups:
+            cfg["hooks"].pop(ev, None)
     for ev, arg in events:
         entries = cfg.setdefault("hooks", {}).setdefault(ev, [])
         if not isinstance(entries, list):
@@ -999,10 +1047,13 @@ def cmd_install(args) -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(target.parent))
     try:
-        os.write(fd, (json.dumps(cfg, indent=2) + "\n").encode())
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        with os.fdopen(fd, "wb") as f:
+            f.write((json.dumps(cfg, indent=2) + "\n").encode())
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        os.unlink(tmp)
+        raise
     if target.exists():
         shutil.copymode(target, tmp)
     os.replace(tmp, target)
@@ -1034,16 +1085,24 @@ def cmd_uninstall(args) -> int:
             cfg["hooks"].pop(ev, None)
     if not cfg.get("hooks"):
         cfg.pop("hooks", None)
-    shutil.copyfile(p, str(p) + ".aw.bak")
+    # A different name from install's backup, or uninstall overwrites the only
+    # copy of the pre-install file with the post-install one — destroying the
+    # rollback at the exact moment someone is trying to roll back.
+    shutil.copyfile(p, str(p) + ".aw-uninstall.bak")
     fd, tmp = tempfile.mkstemp(dir=str(p.parent))
     try:
-        os.write(fd, (json.dumps(cfg, indent=2) + "\n").encode())
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        with os.fdopen(fd, "wb") as f:
+            f.write((json.dumps(cfg, indent=2) + "\n").encode())
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        os.unlink(tmp)
+        raise
     shutil.copymode(p, tmp)
     os.replace(tmp, p)
     print(f"removed {n} hook entr{'y' if n == 1 else 'ies'} from {p}")
+    if Path(str(p) + ".aw.bak").exists():
+        print(f"the pre-install copy is still at {p}.aw.bak")
     return RC_OK
 
 
@@ -1138,23 +1197,41 @@ def cmd_doctor(args) -> int:
             print("  applied" if r.returncode == 0 else f"  failed: {r.stderr.strip()}")
 
     if args.reap:
-        stopped = 0
+        # Only stop a scope this registry can PROVE is orphaned: it has a job
+        # record, and that record's runner is gone while the scope is alive.
+        #
+        # Stopping every aw-*.scope that is merely *unknown* was destroying
+        # healthy work: scope names are global but a registry is per-AW_DIR, so
+        # a job belonging to another registry — or one whose record was pruned —
+        # looked identical to an orphan. Unknown scopes are now reported, not
+        # killed, because "I cannot see it" is not evidence that it is dead.
         with Lock():
-            known = {j.get("scope") for j in live_jobs() if not j.get("ownerless")}
+            jobs = live_jobs()
+        orphans = {j["scope"] for j in jobs if j.get("ownerless") and j.get("scope")}
+        mine = {j.get("scope") for j in jobs}
+        stopped, unknown = 0, []
         try:
-            for d in (USER_CG / "app.slice").iterdir():
-                if d.name.startswith("aw-") and d.name.endswith(".scope") \
-                        and d.name not in known:
+            for d in sorted((USER_CG / "app.slice").iterdir()):
+                if not (d.name.startswith("aw-") and d.name.endswith(".scope")):
+                    continue
+                if d.name in orphans:
                     subprocess.run(["systemctl", "--user", "stop", d.name],
                                    capture_output=True)
                     stopped += 1
                     for jf in (reg_dir() / "jobs").glob("*.json"):
-                        r = read_json(jf) or {}
-                        if r.get("scope") == d.name:
+                        if (read_json(jf) or {}).get("scope") == d.name:
                             jf.unlink(missing_ok=True)
+                elif d.name not in mine:
+                    unknown.append(d.name)
         except OSError:
             pass
-        print(f"\n  reaped {stopped} orphaned aw-*.scope unit(s)")
+        print(f"\n  reaped {stopped} orphaned job(s)")
+        if unknown:
+            print(f"  {len(unknown)} aw-*.scope unit(s) belong to no job record this "
+                  f"registry knows about. Not stopped — they may be another "
+                  f"session's live work:")
+            for u in unknown:
+                print(f"    {u}      systemctl --user stop {u}")
 
     print()
     d = reg_dir()

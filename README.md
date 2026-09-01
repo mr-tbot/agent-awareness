@@ -44,8 +44,10 @@ aw: admitted (9377 MiB free − 2048 = 7329 MiB, floor 4096); cost 2048 MiB [lea
 ```
 
 The job lands in `user@1001.service/app.slice/aw-<id>.scope` — a *sibling* of the editor, not a child
-— with `MemoryMax` set from its measured cost. Verified: a process capped at `MemoryMax=256M` was
-killed by its own cgroup at 128 MiB allocated, while the host's `MemAvailable` did not move.
+— with limits derived from its measured cost — `MemoryHigh` at 1.5x to throttle, `MemoryMax` at 3x as
+the hard wall, and `MemorySwapMax=0`, without which the cap does not bind at all. Verified: a process
+capped at `MemoryMax=256M` was killed by its own cgroup at 128 MiB allocated, while the host's
+`MemAvailable` did not move.
 
 ## What it looks like
 
@@ -109,7 +111,7 @@ marker. Installing three times leaves one entry.
 | `aw status --class build` | One line, one exit code — usable as `aw status && make` |
 | `aw run --class build -- make -j8` | Queue, then run in a capped cgroup |
 | `aw doctor` | The killer, the victim, and the two things that would help most |
-| `aw doctor --reap` | Stop jobs whose runner died but whose work is still running |
+| `aw doctor --reap` | Stop jobs whose runner died but whose work is still running. It stops only jobs **this registry has a record for**; a scope it cannot account for is reported, never killed |
 
 Classes only pick a starting cost: `build` 2 GiB, `render` 4 GiB, `test` 1 GiB, `install` 512 MiB,
 `other` 256 MiB. Override with `--mem 6G`. After the first run of a given command in a given repo the
@@ -152,8 +154,32 @@ the same idle machine. The decision and the claim happen under one lock, so the 
 first one's claim before a byte has moved.
 
 Both thresholds are starting points, not science. `AW_FLOOR_MIB` (4096) and `AW_VETO_PSI` (20.0) are
-environment knobs, every decision is appended to `~/.local/state/agent-awareness/decisions.jsonl`, and
+environment knobs, every decision — admissions **and refusals** — is appended to
+`~/.local/state/agent-awareness/decisions.jsonl`, and
 [docs/tuning.md](docs/tuning.md) is one page on fitting them from your own machine.
+
+## Environment
+
+| Variable | |
+|---|---|
+| `AW_FLOOR_MIB` | MiB that must remain free after a job is admitted (default 4096) |
+| `AW_VETO_PSI` | Memory pressure above which nothing new starts (default 20.0) |
+| `AW_DIR` | Registry location. Default `$XDG_RUNTIME_DIR/agent-awareness` |
+| `AW_STATE` | Learned costs and the decision log. Default `$XDG_STATE_HOME/agent-awareness` |
+| `AW_SETTINGS` | The settings file `aw install` edits. Default `~/.claude/settings.json` |
+
+The last three exist so the tool can be tested without touching your real state — `test_aw.py` uses
+them, and so should you when trying something out.
+
+## Exit codes
+
+| | |
+|---|---|
+| 0 | ok / admitted |
+| 1 | busy — the gate said wait, or the queue timed out waiting for a slot |
+| 2 | refused — a container, a foreign machine-id, a malformed settings file |
+| 3 | error |
+| other | `aw run` returns **the exit code of the command it ran**, so anything else came from your job, not from `aw` |
 
 ## What it does not do
 

@@ -34,8 +34,9 @@ whole design: every objection below is an objection to *deciding* in a hook, not
 
 It records literal fields only — a command's `argv[0]`, a file's basename, a URL's host, a port
 literal, the subagent type. It never records a command string, never classifies "is this a build",
-and always exits 0. Cost is ~43 ms per tool call against a 5-second timeout;
-`aw install --no-activity` leaves it out.
+and always exits 0. Measured cost is **54 ms** per tool call against a 5-second explicit timeout —
+essentially all of it Python interpreter startup. `aw install --no-activity` leaves it out, and
+removes it if it is already installed.
 
 ## Why nothing blocks, and why PostToolUse is absent
 
@@ -76,7 +77,8 @@ The installer:
 - preserves the file mode;
 - keeps exactly one backup, `settings.json.aw.bak`, rather than accumulating timestamped litter;
 - removes only entries carrying its marker, so other tools' hooks survive byte-for-byte;
-- refuses to install at all if the settings *directory* is group- or world-writable, since any local
-  uid could then add a hook that runs as you (`aw install --fix-perms` will chmod it 0700).
+- **refuses** to install if the settings *directory* is **world**-writable, since any local account
+  could then add a hook that runs as you; **warns** if it is only group-writable, which is common
+  under `umask 002` and is your call (`aw install --fix-perms` chmods it 0700 either way).
 
 Installing three times leaves one entry. `aw uninstall` restores the file exactly.

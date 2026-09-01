@@ -37,7 +37,13 @@ def ok(name, cond):
 
 
 def load():
-    """Import aw.py without running main()."""
+    """Import aw.py without running main().
+
+    Thresholds are read from the environment at import, so the caller sets them
+    first. Asserting gate arithmetic against whatever the machine happens to be
+    doing makes the suite fail on a loaded box and pass on an idle one, which is
+    worse than no test — it teaches you to ignore a red result.
+    """
     mod = {}
     src = Path(AW).read_text().replace('if __name__ == "__main__":',
                                        "if False:")
@@ -57,8 +63,10 @@ def main():
     env = {"AW_DIR": str(scratch / "reg"), "AW_STATE": str(scratch / "state")}
     for sub in ("reg/sessions", "reg/jobs", "state"):
         (scratch / sub).mkdir(parents=True, exist_ok=True)
+    # Park the veto out of reach so the arithmetic tests are deterministic; the
+    # veto gets its own test below with the threshold pulled to zero.
+    os.environ.update(env, AW_VETO_PSI="1000")
     m = load()
-    os.environ.update(env)
 
     try:
         print("proc parsing")
@@ -85,6 +93,16 @@ def main():
            not m["gate"](avail - floor + 64)[0])
         ok("a job larger than the machine is refused", not m["gate"](10 ** 9)[0])
         ok("the refusal names the floor", "floor" in m["gate"](10 ** 9)[1])
+        ok("the floor is what is left AFTER the job", m["gate"](0)[0])
+
+        print("pressure veto")
+        os.environ["AW_VETO_PSI"] = "0"
+        mv = load()
+        admitted, why = mv["gate"](1)
+        ok("a zero veto refuses even a 1 MiB job", not admitted)
+        ok("  and the refusal names the oomd threshold, not the floor",
+           "pressure" in why and "kills" in why)
+        os.environ["AW_VETO_PSI"] = "1000"
 
         print("cost estimation")
         check("an unknown key falls back to the class default",
@@ -257,6 +275,36 @@ def main():
               r.returncode, m["RC_REFUSED"])
         ok("  and left untouched", json.loads(wrong.read_text())["hooks"] ==
            ["not", "an", "object"])
+
+        print("hardening regressions")
+        ctrl = "/tmp/" + chr(27) + "[2J" + chr(7) + "evil"
+        run("hook", "activity", env=env, stdin=json.dumps(
+            {"session_id": "ctl", "cwd": ctrl, "tool_name": "Bash",
+             "tool_input": {"command": chr(27) + "[31mfake"}}))
+        blob = run("board", "--json", env=env).stdout
+        import re as _re
+        ok("control bytes are scrubbed at intake, not at print time",
+           not _re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", blob)
+           and "\\u001b" not in blob)
+        run("hook", "end", stdin=json.dumps({"session_id": "ctl"}), env=env)
+
+        shared = scratch / "shared.json"
+        shared.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": f"aw hook activity   {m['MARK']}"},
+            {"type": "command", "command": "devlock-hook pre-bash   # auto-device-lock"},
+            {"type": "command", "command": "node caveman.js"}]}]}}))
+        shenv = {**env, "AW_SETTINGS": str(shared)}
+        run("install", env=shenv)
+        b = shared.read_text()
+        ok("install keeps another tool's hook in a shared matcher group",
+           "devlock-hook" in b and "caveman.js" in b)
+        run("uninstall", env=shenv)
+        b = shared.read_text()
+        ok("uninstall keeps another tool's hook in a shared matcher group",
+           "devlock-hook" in b and "caveman.js" in b)
+        ok("  and removes only ours", m["MARK"] not in b)
+        ok("uninstall writes its own backup, not over install's",
+           (scratch / "shared.json.aw-uninstall.bak").exists())
 
         print("redaction discipline")
         ok("no command strings in the job record beyond argv[0..1]",
